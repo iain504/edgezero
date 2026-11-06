@@ -1,0 +1,32 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// An `edge0 serve` chat session, bound to one model tier.
+model ChatSession {
+  id        String    @id @default(uuid())
+  title     String    @default("New session")
+  tier      String    @default("edge0-35b")
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  messages  Message[]
+}
+
+// One chat turn. Assistant rows carry the engine telemetry captured
+// during generation (tok/s, RAM, SSD I/O, LRU hit rate, prerouter acc).
+model Message {
+  id        String      @id @default(uuid())
+  sessionId String
+  session   ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  role      String
+  content   String
+  telemetry String?
+  createdAt DateTime    @default(now())
+
+  @@index([sessionId, createdAt])
+}
