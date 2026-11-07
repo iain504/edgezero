@@ -1,20 +1,22 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Cpu, FlaskConical, Github, Github as GithubIcon, LayoutGrid, LineChart, Workflow } from "lucide-react";
+import { Cpu, FlaskConical, Github, Github as GithubIcon, LayoutGrid, LineChart, Plug, Workflow } from "lucide-react";
 import { REPO_URL } from "@/lib/edge0/tiers";
 import { Overview } from "./overview";
 import { Playground } from "./playground";
 import { Pipeline } from "./pipeline";
 import { Benchmarks } from "./benchmarks";
+import { ApiServer } from "./api-server";
 
-type View = "overview" | "playground" | "pipeline" | "benchmarks";
+type View = "overview" | "playground" | "pipeline" | "benchmarks" | "api";
 
 const NAV: { id: View; label: string; icon: typeof LayoutGrid }[] = [
   { id: "overview", label: "Overview", icon: LayoutGrid },
   { id: "playground", label: "Playground", icon: Cpu },
   { id: "pipeline", label: "Pipeline", icon: Workflow },
   { id: "benchmarks", label: "Benchmarks", icon: LineChart },
+  { id: "api", label: "API Server", icon: Plug },
 ];
 
 export function Edge0App() {
@@ -90,6 +92,7 @@ export function Edge0App() {
         {view === "playground" ? <Playground /> : null}
         {view === "pipeline" ? <Pipeline /> : null}
         {view === "benchmarks" ? <Benchmarks /> : null}
+        {view === "api" ? <ApiServer /> : null}
       </main>
 
       {/* ---------------------------------------------------- footer ---- */}
