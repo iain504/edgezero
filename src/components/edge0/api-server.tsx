@@ -8,6 +8,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   CheckCircle2,
+  Copy,
+  Eye,
+  EyeOff,
+  KeyRound,
   Plug,
   RadioTower,
   Server,
@@ -42,6 +46,12 @@ interface InsightsPayload {
     avgTokPerSec: number;
     avgTtftMs: number;
   };
+  auth?: {
+    mode: "bearer" | "open";
+    apiKey?: string;
+    masked?: string;
+    envVar?: string;
+  };
 }
 
 interface HealthInfo {
@@ -58,6 +68,8 @@ export function ApiServer() {
   const [origin, setOrigin] = useState("");
   const [health, setHealth] = useState<HealthInfo | null>(null);
   const [insights, setInsights] = useState<InsightsPayload | null>(null);
+  const [showKey, setShowKey] = useState(false);
+  const [keyCopied, setKeyCopied] = useState(false);
 
   // test console
   const [model, setModel] = useState("edge0-35b");
@@ -97,6 +109,19 @@ export function ApiServer() {
   }, [poll]);
 
   const base = origin ? `${origin}/api/v1` : "<this-deployment>/api/v1";
+  const apiKey = insights?.auth?.apiKey ?? "";
+  const authed = insights?.auth?.mode === "bearer" && !!apiKey;
+
+  const copyKey = async () => {
+    if (!apiKey) return;
+    try {
+      await navigator.clipboard.writeText(apiKey);
+      setKeyCopied(true);
+      setTimeout(() => setKeyCopied(false), 1600);
+    } catch {
+      // clipboard unavailable
+    }
+  };
 
   const continueConfig = useMemo(
     () =>
@@ -107,35 +132,36 @@ export function ApiServer() {
               title: "Edge0 35B (local)",
               provider: "openai",
               apiBase: base,
+              apiKey: authed ? apiKey : "local",
               model: "edge0-35b",
-              apiKey: "local",
             },
             {
               title: "Edge0 8B (local, fast)",
               provider: "openai",
               apiBase: base,
+              apiKey: authed ? apiKey : "local",
               model: "edge0-8b",
-              apiKey: "local",
             },
           ],
         },
         null,
         2
       ),
-    [base]
+    [base, authed, apiKey]
   );
 
   const clineConfig = `Provider:     OpenAI Compatible
 Base URL:     ${base}
-API Key:      local
+API Key:      ${authed ? apiKey : "local"}
 Model ID:     edge0-35b        (smart)
               edge0-8b         (fast tier)`;
 
   const curlSmoke = `# 1) list models
-curl ${base}/models
+curl "${base}/models${authed ? `?key=${apiKey}` : ""}"
 
 # 2) streaming chat (SSE)
 curl ${base}/chat/completions \\
+  -H "Authorization: Bearer ${authed ? apiKey : "local"}" \\
   -H "Content-Type: application/json" \\
   -d '{"model":"edge0-35b","stream":true,
        "messages":[{"role":"user","content":"Write a Pine Script EMA cross strategy"}]}'`;
@@ -157,7 +183,10 @@ curl ${base}/chat/completions \\
     try {
       const res = await fetch(`${origin}/api/v1/chat/completions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(authed ? { Authorization: `Bearer ${apiKey}` } : {}),
+        },
         body: JSON.stringify({ model, stream: true, messages: [{ role: "user", content: prompt }] }),
         signal: ctrl.signal,
       });
@@ -247,6 +276,36 @@ curl ${base}/chat/completions \\
               <TierBadge key={t.id} tier={t.id} />
             ))}
           </div>
+        </div>
+
+        <div className="mt-4 flex flex-wrap items-center gap-3 rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2.5">
+          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-amber-400/30 bg-amber-400/10">
+            <KeyRound className="h-3.5 w-3.5 text-amber-300" />
+          </span>
+          <div className="min-w-0">
+            <div className="font-mono text-[10px] uppercase tracking-wider text-zinc-500">api key · {authed ? "required" : "open"}</div>
+            <div className="mt-0.5 truncate font-mono text-[12px] text-amber-200">
+              {!authed ? "no key set — endpoint is open" : showKey ? apiKey : insights?.auth?.masked}
+            </div>
+          </div>
+          {authed ? (
+            <div className="ml-auto flex items-center gap-1">
+              <button
+                onClick={() => setShowKey((v) => !v)}
+                aria-label={showKey ? "Hide API key" : "Reveal API key"}
+                className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
+              >
+                {showKey ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+              <button
+                onClick={copyKey}
+                aria-label="Copy API key"
+                className="rounded-md p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
+              >
+                {keyCopied ? <CheckCircle2 className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
+              </button>
+            </div>
+          ) : null}
         </div>
 
         <div className="mt-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
@@ -421,7 +480,12 @@ curl ${base}/chat/completions \\
         Response text comes from a hosted stand-in model — swap{" "}
         <span className="font-mono text-zinc-300">generateReply()</span> for your real{" "}
         <span className="font-mono text-zinc-300">edge0 serve</span> (Apple Silicon / Windows-Vulkan) and every client
-        above keeps working unchanged.
+        above keeps working unchanged. Auth: the endpoint requires{" "}
+        <span className="font-mono text-zinc-300">Authorization: Bearer</span> (also accepts{" "}
+        <span className="font-mono text-zinc-300">x-api-key</span> or{" "}
+        <span className="font-mono text-zinc-300">?key=</span> for curl). Rotate the secret via{" "}
+        <span className="font-mono text-zinc-300">EDGE0_API_KEY</span> in{" "}
+        <span className="font-mono text-zinc-300">.env.local</span> + restart.
       </div>
     </div>
   );
