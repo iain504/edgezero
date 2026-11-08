@@ -55,3 +55,6 @@ server.log
 # runtime data (chat db contains local history)
 /db/
 *.db
+
+# sandbox runtime artifacts
+*.pid
