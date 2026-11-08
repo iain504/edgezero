@@ -14,6 +14,7 @@ export interface ApiRequestRecord {
   ttftMs: number; // time to first token (incl. prefill window)
   durationMs: number;
   status: number;
+  engine?: "hosted-standin" | "offline-template";
   error?: string;
 }
 
@@ -26,6 +27,16 @@ export interface Insights {
     avgTokPerSec: number;
     avgTtftMs: number;
   };
+  engine: EngineHealth;
+}
+
+export interface EngineHealth {
+  status: "hosted" | "offline";
+  lastHostedOkAt: string | null;
+  lastOfflineAt: string | null;
+  offlineStreak: number;
+  hostedOkCount: number;
+  offlineCount: number;
 }
 
 interface RegistryState {
@@ -33,6 +44,7 @@ interface RegistryState {
   totalRequests: number;
   totalPromptTokens: number;
   totalCompletionTokens: number;
+  engine: EngineHealth;
 }
 
 const g = globalThis as unknown as { __edge0ApiRegistry?: RegistryState };
@@ -44,6 +56,14 @@ function state(): RegistryState {
       totalRequests: 0,
       totalPromptTokens: 0,
       totalCompletionTokens: 0,
+      engine: {
+        status: "hosted",
+        lastHostedOkAt: null,
+        lastOfflineAt: null,
+        offlineStreak: 0,
+        hostedOkCount: 0,
+        offlineCount: 0,
+      },
     };
   }
   return g.__edge0ApiRegistry;
@@ -60,6 +80,26 @@ export function recordRequest(rec: ApiRequestRecord) {
   s.totalCompletionTokens += rec.completionTokens;
 }
 
+/** Track stand-in model availability — called by the responder per attempt outcome. */
+export function noteEngine(offline: boolean) {
+  const e = state().engine;
+  if (offline) {
+    e.status = "offline";
+    e.lastOfflineAt = new Date().toISOString();
+    e.offlineStreak += 1;
+    e.offlineCount += 1;
+  } else {
+    e.status = "hosted";
+    e.lastHostedOkAt = new Date().toISOString();
+    e.offlineStreak = 0;
+    e.hostedOkCount += 1;
+  }
+}
+
+export function getEngineHealth(): EngineHealth {
+  return { ...state().engine };
+}
+
 export function getInsights(): Insights {
   const s = state();
   const ok = s.requests.filter((r) => r.status === 200 && r.completionTokens > 0);
@@ -73,6 +113,7 @@ export function getInsights(): Insights {
       avgTokPerSec: +avg(ok.map((r) => r.tokPerSec)).toFixed(1),
       avgTtftMs: Math.round(avg(ok.map((r) => r.ttftMs))),
     },
+    engine: getEngineHealth(),
   };
 }
 

@@ -1,10 +1,20 @@
 // Response engine for the edge0 OpenAI-compatible endpoint.
 //
-//   text     → hosted stand-in LLM (z-ai-web-dev-sdk), with a deterministic
-//              offline template fallback so the endpoint never dead-ends.
+//   text     → hosted stand-in LLM (z-ai-web-dev-sdk), with retry/backoff and
+//              a deterministic offline fallback so the endpoint never dead-ends.
 //   pacing   → Edge0Sim drives per-token delay from the tier's decode model,
 //              so edge0-35b streams at ~15–18 tok/s and edge0-8b at ~24 tok/s
 //              exactly like the paper's numbers. TTFT reflects prefill rate.
+//
+// Resilience contract:
+//   - 3 attempts with linear backoff before degrading to offline templates
+//   - oversized prompts are truncated (scan payloads with OHLCV arrays can
+//     otherwise fail deterministically, flapping the engine offline)
+//   - when the client asks for JSON (scanners do), the offline fallback is a
+//     valid, conservative "skip" signal — never prose — so downstream JSON
+//     parsers keep working through engine outages
+//   - EDGE0_FORCE_OFFLINE=1 pins the engine to offline templates (test mode
+//     for client-side outage handling)
 //
 // Swapping in the REAL engine later = replace generateReply() with a call to
 // `edge0 serve` (or the Rust daemon) — the API contract stays identical.
@@ -12,13 +22,24 @@
 import ZAI from "z-ai-web-dev-sdk";
 import { Edge0Sim } from "@/lib/edge0/engine-sim";
 import { TierConfig } from "@/lib/edge0/tiers";
+import { noteEngine } from "@/lib/edge0/server/registry";
 
 export interface ChatMsg {
   role: "system" | "user" | "assistant";
   content: string;
 }
 
+export interface GenerateResult {
+  text: string;
+  offline: boolean;
+  attempts: number;
+}
+
 const MAX_CONTEXT_MSGS = 14;
+const MAX_MSG_CHARS = 12_000;
+const MAX_ATTEMPTS = 3;
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function systemPrompt(cfg: TierConfig): string {
   return (
@@ -29,35 +50,78 @@ function systemPrompt(cfg: TierConfig): string {
     `Act as an expert coding assistant: precise, concise, production-minded. ` +
     `Prefer short paragraphs, lists, and fenced code blocks with language tags. ` +
     `If the user's message includes code, reference it specifically. ` +
+    `When the user asks for JSON output, reply with ONLY the JSON object — no prose, no fences. ` +
     `You run fully on-device — never suggest sending code to the cloud.`
   );
 }
 
-/** Ask the stand-in model for a full reply. Falls back to offline templates. */
-export async function generateReply(cfg: TierConfig, msgs: ChatMsg[]): Promise<{ text: string; offline: boolean }> {
-  const trimmed = msgs.slice(-MAX_CONTEXT_MSGS);
-  try {
-    const zai = await ZAI.create();
-    const completion = await zai.chat.completions.create({
-      messages: [{ role: "assistant", content: systemPrompt(cfg) }, ...trimmed],
-      thinking: { type: "disabled" },
-    });
-    const text = completion.choices[0]?.message?.content ?? "";
-    if (text.trim()) return { text, offline: false };
-  } catch {
-    // hosted model unavailable — degrade to the offline stand-in
+/** Ask the stand-in model for a full reply. Retries, then falls back offline. */
+export async function generateReply(cfg: TierConfig, msgs: ChatMsg[]): Promise<GenerateResult> {
+  const forceOffline = process.env.EDGE0_FORCE_OFFLINE === "1";
+  const trimmed = msgs.slice(-MAX_CONTEXT_MSGS).map((m) => ({
+    ...m,
+    content:
+      m.content.length > MAX_MSG_CHARS
+        ? m.content.slice(0, MAX_MSG_CHARS) + " …[truncated]"
+        : m.content,
+  }));
+
+  if (!forceOffline) {
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        const zai = await ZAI.create();
+        const completion = await zai.chat.completions.create({
+          messages: [{ role: "assistant", content: systemPrompt(cfg) }, ...trimmed],
+          thinking: { type: "disabled" },
+        });
+        const text = completion.choices[0]?.message?.content ?? "";
+        if (text.trim()) {
+          noteEngine(false);
+          return { text, offline: false, attempts: attempt };
+        }
+      } catch {
+        // transient gateway/model failure — back off and retry
+      }
+      if (attempt < MAX_ATTEMPTS) await sleep(400 * attempt);
+    }
   }
-  return { text: offlineReply(cfg, msgs), offline: true };
+
+  noteEngine(true);
+  return { text: offlineReply(cfg, msgs), offline: true, attempts: forceOffline ? 0 : MAX_ATTEMPTS };
 }
 
 // --------------------------------------------------------------- offline ----
 
+/** Detect "answer me in JSON" prompts — scanners depend on parseable output. */
+function wantsJson(last: string): boolean {
+  return /\bjson\b/i.test(last) || /"verdict"|"signal"|"confidence"|\bverdict\b.*\bformat\b/i.test(last);
+}
+
+/** Deterministic, parseable, conservative no-trade signal for JSON-mode prompts. */
+function offlineSignalJson(cfg: TierConfig): string {
+  return JSON.stringify({
+    verdict: "skip",
+    action: "none",
+    signal: "none",
+    confidence: 0,
+    entry: null,
+    stop: null,
+    target: null,
+    engine: `${cfg.id}-offline-standin`,
+    retryable: true,
+    reason:
+      "edge0 stand-in engine temporarily offline; this is the offline fallback signal — the scan cycle should retry",
+  });
+}
+
 /**
- * Deterministic, dependency-free stand-in answers. Good enough to prove the
- * wire protocol end-to-end when the hosted model is unreachable.
+ * Deterministic, dependency-free stand-in answers. JSON-mode prompts get a
+ * parseable signal object; everything else gets prose templates.
  */
 export function offlineReply(cfg: TierConfig, msgs: ChatMsg[]): string {
   const last = [...msgs].reverse().find((m) => m.role === "user")?.content ?? "";
+  if (wantsJson(last)) return offlineSignalJson(cfg);
+
   const lower = last.toLowerCase();
   const note = `\n\n*(served by ${cfg.id} · offline stand-in response)*`;
 

@@ -25,6 +25,8 @@ export const runtime = "nodejs";
 export const maxDuration = 120;
 export const dynamic = "force-dynamic";
 
+const engineTag = (offline: boolean) => (offline ? "offline-template" : "hosted-standin") as const;
+
 interface Body {
   model?: string;
   prompt?: string | string[];
@@ -94,6 +96,7 @@ export async function POST(req: NextRequest) {
       ttftMs: totalMs,
       durationMs: totalMs,
       status: 200,
+      engine: engineTag(offline),
     });
     return json({
       id,
@@ -140,6 +143,7 @@ export async function POST(req: NextRequest) {
       ttftMs: ttftMs || Date.now() - started,
       durationMs: Date.now() - started,
       status,
+      engine: engineTag(offline),
       error,
     });
   };

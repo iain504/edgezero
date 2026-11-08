@@ -7,6 +7,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
+  AlertTriangle,
   CheckCircle2,
   Copy,
   Eye,
@@ -34,6 +35,7 @@ interface RequestRecord {
   ttftMs: number;
   durationMs: number;
   status: number;
+  engine?: "hosted-standin" | "offline-template";
   error?: string;
 }
 
@@ -51,6 +53,14 @@ interface InsightsPayload {
     apiKey?: string;
     masked?: string;
     envVar?: string;
+  };
+  engine?: {
+    status: "hosted" | "offline";
+    lastHostedOkAt: string | null;
+    lastOfflineAt: string | null;
+    offlineStreak: number;
+    hostedOkCount: number;
+    offlineCount: number;
   };
 }
 
@@ -242,6 +252,18 @@ curl ${base}/chat/completions \\
         sub="This deployment exposes /api/v1 — an OpenAI wire-compatible API with SSE streaming, paced by the edge0 decode model. Point VS Code (Continue, Cline, any OpenAI client) at it and watch requests land live."
       />
 
+      {insights?.engine?.status === "offline" ? (
+        <div className="mb-6 flex flex-wrap items-center gap-3 rounded-xl border border-orange-400/40 bg-orange-400/10 px-4 py-3">
+          <AlertTriangle className="h-4 w-4 shrink-0 text-orange-300" />
+          <div className="text-[12.5px] leading-relaxed text-orange-200">
+            <span className="font-semibold">Stand-in model unreachable</span> — requests retry 3× then fall back to
+            offline templates. JSON-asking clients receive a valid{" "}
+            <span className="font-mono">{"{verdict: \"skip\", retryable: true}"}</span> signal instead of prose,
+            so scanners keep parsing. Auto-recovers on the next request once the gateway is back.
+          </div>
+        </div>
+      ) : null}
+
       {/* ----------------------------------------------- connection status ---- */}
       <Panel className="p-5">
         <div className="flex flex-wrap items-center justify-between gap-4">
@@ -387,7 +409,14 @@ curl ${base}/chat/completions \\
                     <td className="py-2 pr-3 text-zinc-500">{formatTime(r.ts)}</td>
                     <td className="px-2 py-2 text-zinc-300">{r.client}</td>
                     <td className="px-2 py-2 text-zinc-400">/{r.route}</td>
-                    <td className={`px-2 py-2 ${r.model.includes("35") ? "text-amber-200" : "text-emerald-200"}`}>{r.model}</td>
+                    <td className={`px-2 py-2 ${r.model.includes("35") ? "text-amber-200" : "text-emerald-200"}`}>
+                      {r.model}
+                      {r.engine === "offline-template" ? (
+                        <span className="ml-1.5 rounded bg-orange-400/15 px-1 py-0.5 text-[9.5px] uppercase tracking-wide text-orange-300">
+                          stand-in
+                        </span>
+                      ) : null}
+                    </td>
                     <td className="px-2 py-2 text-zinc-500">{r.stream ? "SSE" : "json"}</td>
                     <td className="px-2 py-2 text-right text-orange-200">{r.tokPerSec.toFixed(1)}</td>
                     <td className="px-2 py-2 text-right text-zinc-500">{r.ttftMs} ms</td>
