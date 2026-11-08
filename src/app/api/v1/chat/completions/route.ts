@@ -37,6 +37,7 @@ interface Body {
   messages?: { role?: string; content?: unknown }[];
   stream?: boolean;
   max_tokens?: number;
+  response_format?: { type?: string };
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -86,6 +87,9 @@ export async function POST(req: NextRequest) {
   }
 
   const stream = body.stream === true;
+  // Explicit JSON contract (OpenAI-style) → offline fallback must be a signal,
+  // never prose, so scanner-side JSON.parse() keeps working during outages.
+  const jsonMode = body.response_format?.type === "json_object";
   const id = newCompletionId();
   const created = Math.floor(Date.now() / 1000);
   const model = cfg.id;
@@ -96,7 +100,7 @@ export async function POST(req: NextRequest) {
 
   // ---------------------------------------------------------- non-streaming
   if (!stream) {
-    const { text, offline } = await generateReply(cfg, msgs);
+    const { text, offline } = await generateReply(cfg, msgs, jsonMode);
     const done = await collectText(cfg, text, maxTokens, req.signal, offline);
     const totalMs = Date.now() - started;
     recordRequest({
@@ -177,6 +181,10 @@ export async function POST(req: NextRequest) {
       const send = (payload: unknown) => {
         if (!cancelled) controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
       };
+      // OpenAI's stream sentinel is the literal token [DONE], unquoted.
+      const sendDone = () => {
+        if (!cancelled) controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      };
       const chunk = (delta: Record<string, unknown>, finish: string | null, extra: Record<string, unknown> = {}) => ({
         id,
         object: "chat.completion.chunk",
@@ -192,7 +200,7 @@ export async function POST(req: NextRequest) {
 
         // "prefill": the stand-in model call fills this window, exactly like
         // the engine's prompt ingest before the first decoded token.
-        const reply = await generateReply(cfg, msgs);
+        const reply = await generateReply(cfg, msgs, jsonMode);
         offline = reply.offline;
         await sleep(Math.min(simulatedPrefillMs(cfg, promptTokens), 1200));
 
@@ -229,7 +237,7 @@ export async function POST(req: NextRequest) {
             },
           })
         );
-        send("[DONE]");
+        sendDone(); // OpenAI sentinel — unquoted, verbatim
         recordDone(200);
       } catch (err) {
         recordDone(500, err instanceof Error ? err.message : "engine failure");

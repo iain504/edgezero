@@ -33,6 +33,7 @@ interface Body {
   stream?: boolean;
   max_tokens?: number;
   suffix?: string;
+  response_format?: { type?: string };
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -58,6 +59,8 @@ export async function POST(req: NextRequest) {
   }
 
   const cfg: TierConfig = getTier(body.model ?? "edge0-35b");
+  // JSON contract (OpenAI-style) → offline fallback is a signal, never prose.
+  const jsonMode = body.response_format?.type === "json_object";
   const id = newCompletionId();
   const created = Math.floor(Date.now() / 1000);
   const model = cfg.id;
@@ -73,7 +76,7 @@ export async function POST(req: NextRequest) {
 
   // ---------------------------------------------------------- non-streaming
   if (!stream) {
-    const { text, offline } = await generateReply(cfg, msgs);
+    const { text, offline } = await generateReply(cfg, msgs, jsonMode);
     let out = "";
     let n = 0;
     let tps = cfg.decodeRange[0];
@@ -158,6 +161,10 @@ export async function POST(req: NextRequest) {
       const send = (payload: unknown) => {
         if (!cancelled) controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
       };
+      // OpenAI's stream sentinel is the literal token [DONE], unquoted.
+      const sendDone = () => {
+        if (!cancelled) controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      };
       const chunk = (text: string, finish: string | null, extra: Record<string, unknown> = {}) => ({
         id,
         object: "text_completion.chunk",
@@ -170,7 +177,7 @@ export async function POST(req: NextRequest) {
 
       try {
         send(chunk("", null));
-        const reply = await generateReply(cfg, msgs);
+        const reply = await generateReply(cfg, msgs, jsonMode);
         offline = reply.offline;
         await sleep(Math.min(simulatedPrefillMs(cfg, promptTokens), 1200));
 
@@ -190,7 +197,7 @@ export async function POST(req: NextRequest) {
           },
           edge0: { tier: model, tok_per_sec: +lastTps.toFixed(1), ttft_ms: ttftMs, engine: offline ? "offline-template" : "hosted-standin" },
         }));
-        send("[DONE]");
+        sendDone(); // OpenAI sentinel — unquoted, verbatim
         recordDone(200);
       } catch (err) {
         recordDone(500, err instanceof Error ? err.message : "engine failure");

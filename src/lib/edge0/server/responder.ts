@@ -55,8 +55,15 @@ function systemPrompt(cfg: TierConfig): string {
   );
 }
 
-/** Ask the stand-in model for a full reply. Retries, then falls back offline. */
-export async function generateReply(cfg: TierConfig, msgs: ChatMsg[]): Promise<GenerateResult> {
+/** Ask the stand-in model for a full reply. Retries, then falls back offline.
+ *  `jsonMode` is set by callers that received an explicit JSON contract
+ *  (response_format: json_object) — the offline fallback then returns a
+ *  signal object instead of prose. */
+export async function generateReply(
+  cfg: TierConfig,
+  msgs: ChatMsg[],
+  jsonMode = false
+): Promise<GenerateResult> {
   const forceOffline = process.env.EDGE0_FORCE_OFFLINE === "1";
   const trimmed = msgs.slice(-MAX_CONTEXT_MSGS).map((m) => ({
     ...m,
@@ -87,14 +94,34 @@ export async function generateReply(cfg: TierConfig, msgs: ChatMsg[]): Promise<G
   }
 
   noteEngine(true);
-  return { text: offlineReply(cfg, msgs), offline: true, attempts: forceOffline ? 0 : MAX_ATTEMPTS };
+  return {
+    text: offlineReply(cfg, msgs, jsonMode),
+    offline: true,
+    attempts: forceOffline ? 0 : MAX_ATTEMPTS,
+  };
 }
 
 // --------------------------------------------------------------- offline ----
 
-/** Detect "answer me in JSON" prompts — scanners depend on parseable output. */
-function wantsJson(last: string): boolean {
-  return /\bjson\b/i.test(last) || /"verdict"|"signal"|"confidence"|\bverdict\b.*\bformat\b/i.test(last);
+/**
+ * Detect "answer me in JSON" prompts — scanners depend on parseable output.
+ *
+ * Scanners put the JSON contract in the SYSTEM message ("reply with ONLY a
+ * JSON object with verdict/confidence…") and the last user message is often
+ * just data (OHLCV rows). So scan the full conversation, not just the last
+ * turn: every system message plus the tail of the final user message.
+ */
+function wantsJson(msgs: ChatMsg[]): boolean {
+  const sys = msgs
+    .filter((m) => m.role === "system")
+    .map((m) => m.content)
+    .join("\n");
+  const last = [...msgs].reverse().find((m) => m.role === "user")?.content ?? "";
+  const hay = `${sys}\n${last.slice(-4000)}`;
+  return (
+    /\bjson\b/i.test(hay) ||
+    /"verdict"|"signal"|"confidence"|\bverdict\b|\bexit\b.*\bplan\b/i.test(hay)
+  );
 }
 
 /** Deterministic, parseable, conservative no-trade signal for JSON-mode prompts. */
@@ -118,10 +145,10 @@ function offlineSignalJson(cfg: TierConfig): string {
  * Deterministic, dependency-free stand-in answers. JSON-mode prompts get a
  * parseable signal object; everything else gets prose templates.
  */
-export function offlineReply(cfg: TierConfig, msgs: ChatMsg[]): string {
-  const last = [...msgs].reverse().find((m) => m.role === "user")?.content ?? "";
-  if (wantsJson(last)) return offlineSignalJson(cfg);
+export function offlineReply(cfg: TierConfig, msgs: ChatMsg[], jsonMode = false): string {
+  if (jsonMode || wantsJson(msgs)) return offlineSignalJson(cfg);
 
+  const last = [...msgs].reverse().find((m) => m.role === "user")?.content ?? "";
   const lower = last.toLowerCase();
   const note = `\n\n*(served by ${cfg.id} · offline stand-in response)*`;
 
